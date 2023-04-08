@@ -1,0 +1,78 @@
+---
+title: "Des Moine Flood Prediction"
+author: "Charlie Huemmler & Promit Chatterjee"
+date: "2023-04-08"
+ooutput:
+  html_document: 
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    code_folding: hide
+    pdf_document: default
+    theme: journal
+---
+
+```{r setup, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+  warning=FALSE,
+  message=FALSE,
+  results='hide')
+
+
+
+library(tidyverse)
+library(sf)
+library(raster)
+
+library(terra)
+library(tigris)
+
+#set wd
+setwd("C:/Users/cchue/Documents/Penn MUSA/Spring/Land Use/cpln675_assignment3/midTermProject_Data")
+
+
+```
+
+# Predicing Flooding in  Des Moines Iowa
+
+## Load data
+
+### Calgary
+
+```{r}
+calgary <- read_sf("CALGIS_CITYBOUND_LIMIT") 
+
+cal_inun <- raster("inundation/prj.adf")
+
+inundation_sf <- rasterToPolygons(cal_inun, fun=function(x){x==1}) %>%
+  st_as_sf() %>% 
+  st_transform(st_crs(cal_grid)) %>% 
+  st_union() %>% st_sf()
+
+cal_grid$inun <- st_intersects(cal_grid, inundation_sf, sparse = F)
+
+ggplot()+
+  geom_sf(data = cal_grid, aes(fill = inun))
+
+
+```
+
+
+
+
+### Des Moines
+
+## Make Grid and add Variables
+
+```{r}
+
+
+cal_grid <- st_make_grid(calgary, cellsize = 1000) # 1 KM
+cal_grid <- cal_grid[calgary] %>%            # clips the grid to the boundary file
+  st_sf() %>%
+  mutate(uniqueID = as.character(rownames(.)))
+
+cal_grid_centroid <- st_centroid(cal_grid)
+
+```
+
