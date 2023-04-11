@@ -23,13 +23,15 @@ knitr::opts_chunk$set(echo = TRUE,
 library(tidyverse)
 library(sf)
 library(raster)
-
 library(terra)
-library(tigris)
+library(here)
+library(cowplot)
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
 
 #set wd
-setwd("C:/Users/cchue/Documents/Penn MUSA/Spring/Land Use/cpln675_assignment3/midTermProject_Data")
-
+setwd("C:/Users/cchue/Documents/Penn MUSA/Spring/Land Use/cpln675_assn3")
+folder <- here()
 
 ```
 
@@ -40,19 +42,44 @@ setwd("C:/Users/cchue/Documents/Penn MUSA/Spring/Land Use/cpln675_assignment3/mi
 ### Calgary
 
 ```{r}
-calgary <- read_sf("CALGIS_CITYBOUND_LIMIT") 
+calgary <- read_sf(paste(folder,"/midTermProject_Data/CALGIS_CITYBOUND_LIMIT/CALGIS_CITYBOUND_LIMIT.shp", sep ='')) 
 
-cal_inun <- raster("inundation/prj.adf")
+# inundatation (target Var)
+cal_inun <- raster(paste(folder,"/midTermProject_Data/inundation/prj.adf",sep=''))
 
-inundation_sf <- rasterToPolygons(cal_inun, fun=function(x){x==1}) %>%
-  st_as_sf() %>% 
-  st_transform(st_crs(cal_grid)) %>% 
-  st_union() %>% st_sf()
 
-cal_grid$inun <- st_intersects(cal_grid, inundation_sf, sparse = F)
+# Land use
 
-ggplot()+
-  geom_sf(data = cal_grid, aes(fill = inun))
+Calgary_Z = read.csv(paste(folder,"/midTermProject_Data/Calgary_Land_Use_Districts.csv", sep='')) %>% st_as_sf(wkt= 'MULTIPOLYGON', crs = 'EPSG:4326 WGS84') %>% st_transform(crs = st_crs(calgary))
+#, crs = st_crs
+
+
+Calgary_Z = Calgary_Z %>% mutate(CodeFirstLetter = substr(LU_CODE, 0, 1))
+
+
+Calgary_Z = Calgary_Z %>% mutate(ZoningType = case_when(
+  CodeFirstLetter == "D" ~ "SALDO",
+  CodeFirstLetter == "S" ~ "SALDO",
+  CodeFirstLetter == "A" ~ "SALDO",
+  CodeFirstLetter == "D" ~ "Residential",
+  CodeFirstLetter == "R" ~ "Residential",
+  CodeFirstLetter == "H" ~ "SALDO",
+  CodeFirstLetter == "M" ~ "Mixed-Use",
+  CodeFirstLetter == "I" ~ "Industrial",
+  CodeFirstLetter == "F" ~ "Farm",
+  CodeFirstLetter == "C" ~ "Commercial")) 
+
+cal_zoning <- Calgary_Z %>% dplyr::select(MULTIPOLYGON, ZoningType)
+
+# slope
+
+cal_slope <- raster(paste(folder,"/midTermProject_Data/SlopeFill_Calgary.tif",sep=''))
+
+res(cal_slope)
+
+# river
+
+hydrology <- st_read("https://data.calgary.ca/api/geospatial/5fk8-xqeu?method=export&format=GeoJSON")
 
 
 ```
@@ -62,7 +89,68 @@ ggplot()+
 
 ### Des Moines
 
+```{r}
+desmoines<- read_sf(paste(folder,"/DesMoines/Jurisdiction/City.shp", sep ='')) %>%  filter( MUNI == "DESM")
+
+
+
+
+################## Land use
+
+DesMoines_Z =  read_sf(paste(folder,"/DesMoines/DesMoines_Zoning/Zoning/ZoningDistrict.shp", sep = ''))
+
+
+DesMoines_Z = DesMoines_Z %>% mutate(CodeFirstLetter = substr(ZoneType, 0, 1))
+
+unique(DesMoines_Z$CodeFirstLetter) # N, NX, A, P
+
+DesMoines_Z = DesMoines_Z %>% mutate(ZoningType = case_when(
+  CodeFirstLetter == "P" ~ "SALDO",
+  CodeFirstLetter == "N" ~ "SALDO",
+  CodeFirstLetter == "A" ~ "SALDO",
+  CodeFirstLetter == "D" ~ "Residential",
+  CodeFirstLetter == "R" ~ "Residential",
+  CodeFirstLetter == "E" ~ "Industrial",
+  CodeFirstLetter == "M" ~ "Mixed-Use",
+  CodeFirstLetter == "I" ~ "Industrial",
+  CodeFirstLetter == "F" ~ "Farm",
+  CodeFirstLetter == "C" ~ "Commercial"))
+
+des_zoning <- DesMoines_Z %>% dplyr::select(ZoningType)
+
+
+########### slope
+
+des_dem <- raster(paste(folder,"/DesMoines/polk.tif",sep='')) 
+crs(des_dem) <- CRS('+init=EPSG:4269')
+
+
+# plot(des_dem)
+# res(des_dem)
+
+des_slope <- des_dem  %>% raster::terrain(opt = 'slope', unit = 'degrees')
+
+
+########## dist to river
+
+des_hydrology <- read_sf(paste(folder,"/DesMoines/Hydrology/HydroMajorStream.shp", sep ='')) %>% 
+  st_crop(y = st_bbox(desmoines))
+
+
+st_crs(desmoines) == st_crs(des_hydrology)
+
+ggplot(desmoines)+
+  geom_sf()+
+  geom_sf(data = des_zoning, aes(fill = ZoningType), color = NA)+
+  geom_sf(data = des_hydrology, fill = 'blue', color = NA)
+
+
+```
+
+
 ## Make Grid and add Variables
+
+### Calgary
 
 ```{r}
 
@@ -72,7 +160,311 @@ cal_grid <- cal_grid[calgary] %>%            # clips the grid to the boundary fi
   st_sf() %>%
   mutate(uniqueID = as.character(rownames(.)))
 
-cal_grid_centroid <- st_centroid(cal_grid)
+
+
+
+
 
 ```
+
+```{r add cal inundation}
+
+
+cal_inun_100 <- aggregate(cal_inun, fact = 10)
+
+
+inun_grid <- cal_inun_100 %>% 
+# Crop it to fit the dimensions of the fishnet
+  crop(y = cal_grid) %>%
+  # Convert to spatial polygons data.frame
+  as('SpatialPolygonsDataFrame') %>%
+  # Convert to Sf format
+  st_as_sf() %>% 
+  st_transform(crs = st_crs(calgary)) %>%
+  # Join in fishnet cell ids to all points located within them
+  st_join(cal_grid) %>%
+  # convert to data.frame,
+  as.data.frame() %>%
+  # then for each unique fishnet grid cell
+  group_by(uniqueID) %>%
+  # get the mean of the photovoltaic output values
+  summarize(inun = mean(COUNT, na.rm = TRUE))
+
+cal_grid_out <- left_join(inun_grid %>% st_drop_geometry(), cal_grid) %>% st_sf()
+
+
+
+```
+
+```{r cal slope}
+
+
+slope_grid <- cal_slope %>% 
+# Crop it to fit the dimensions of the fishnet
+  crop(y = cal_grid) %>%
+  # Convert to spatial polygons data.frame
+  as('SpatialPolygonsDataFrame') %>%
+  # Convert to Sf format
+  st_as_sf() %>% 
+  st_transform(crs = st_crs(calgary)) %>%
+  # Join in fishnet cell ids to all points located within them
+  st_join(cal_grid) %>%
+  # convert to data.frame,
+  as.data.frame() %>%
+  # then for each unique fishnet grid cell
+  group_by(uniqueID) %>%
+  # get the mean of the photovoltaic output values
+  summarize(slope = mean(SlopeFill_Calgary, na.rm = TRUE)) %>%
+  # and then combine the dataset back together
+  ungroup()
+
+cal_grid_out <- left_join(cal_grid_out, slope_grid) %>% st_sf()
+
+```
+
+
+```{r call dist to river}
+
+cal_grid_centroid <- cal_grid %>%
+  st_centroid()
+
+water_dist <- cal_grid_centroid %>% 
+  st_distance(hydrology %>% 
+                st_transform(st_crs(cal_grid_centroid))) %>%
+  as.data.frame() %>%
+  mutate(uniqueID = as.character(row_number())) %>%
+  gather(-uniqueID, key = "variable", value = "value") %>%
+  dplyr::select(-variable) %>%
+  group_by(uniqueID) %>%
+  summarize(water_dist = min(value) %>%  as.numeric())
+
+cal_grid_out <- left_join(cal_grid_out, water_dist) %>% st_sf()
+
+
+
+
+```
+
+
+```{r cal land use}
+
+
+
+
+cal_zone_grid <- cal_grid %>% st_centroid() %>% st_join(cal_zoning, join=st_within) %>% 
+  st_drop_geometry() %>% 
+  full_join(., cal_grid) %>% st_sf()
+
+cal_grid_out <- left_join(cal_grid_out, cal_zone_grid %>% st_drop_geometry()) %>% st_sf()
+
+
+
+```
+```{r lu map}
+
+p1<-cal_zoning %>% ggplot()+
+  geom_sf(aes(fill = ZoningType), color = NA)+
+  geom_sf(data = cal_grid_centroid, alpha = .5, size = .5)+
+  mapTheme()+
+  theme(legend.position = 'none')+
+  labs(subtitle = 'Calgary Land Use into fishnet')
+
+p2<-cal_grid_out %>% ggplot()+
+  geom_sf(aes(fill = ZoningType), color = NA)+
+  mapTheme()+
+  labs(subtitle = '')
+
+plot_grid(p1,p2, rel_widths = c(.655,1))
+
+```
+
+
+```{r graph}
+
+# cal_grid_out %>%
+#   gather(inun, slope, water_dist, key = variable, value= value) %>% 
+#   ggplot()+
+#     geom_sf(aes(fill = value), color = NA)+
+#   facet_wrap(~variable)
+
+
+p1<-ggplot(cal_grid_out)+
+  geom_sf(aes(fill = inun), color = NA)+
+  mapTheme()+
+  labs(title = 'Calgary', subtitle = 'Level of Innundation', fill = 'Was\nInundated')
+
+
+p2<-ggplot(cal_grid_out)+
+  geom_sf(aes(fill = slope), color = NA)+
+  mapTheme()+
+  labs(title = '', subtitle = 'Slope', fill = '')
+
+
+p3<-ggplot(cal_grid_out)+
+  geom_sf(aes(fill = water_dist), color = NA)+
+  mapTheme()+
+  labs(title = '',subtitle = 'Distance to River', fill = 'meters')
+
+
+p4<- cal_grid_out %>% ggplot()+
+  geom_sf(aes(fill = ZoningType), color = NA)+
+  mapTheme()+
+  labs(title = '',subtitle = 'Land Use', fill = '')
+
+plot_grid(p1,p2,p3,p4)
+
+
+```
+
+
+### Des Moines
+
+
+```{r}
+
+
+des_grid <- st_make_grid(desmoines, cellsize = 1000) # 1 KM
+des_grid <- des_grid[desmoines] %>%            # clips the grid to the boundary file
+  st_sf() %>%
+  mutate(uniqueID = as.character(rownames(.)))
+
+
+
+
+
+```
+
+
+
+```{r des slope}
+
+des_slope_sf <-des_slope %>% raster::aggregate(fact = 10) %>% 
+# Crop it to fit the dimensions of the fishnet
+  # Convert to spatial polygons data.frame
+  as('SpatialPolygonsDataFrame') %>%
+  # Convert to Sf format
+  st_as_sf()  %>% st_transform(crs = st_crs(desmoines))
+
+
+st_crs(des_slope_sf)==st_crs(des_grid)
+
+slope_grid <- des_slope_sf  %>%
+  # Join in fishnet cell ids to all points located within them
+  st_join(des_grid) %>%
+  # convert to data.frame,
+  as.data.frame() %>%
+  # then for each unique fishnet grid cell
+  group_by(uniqueID) %>%
+  # get the mean of the photovoltaic output values
+  summarize(slope = mean(slope, na.rm = TRUE)) %>%
+  # and then combine the dataset back together
+  ungroup()
+
+
+des_grid_out <- left_join(des_grid, slope_grid) %>% st_sf()
+
+des_grid_out %>% ggplot()+
+  geom_sf(aes(fill = slope), color = NA)
+```
+
+
+```{r call dist to rivasdfer}
+
+ggplot(des_hydrology)+
+  geom_sf(data = des_grid)+
+  geom_sf()
+
+
+des_grid_centroid <- des_grid %>%
+  st_centroid()
+
+
+water_dist <- des_grid_centroid %>% 
+  st_distance(des_hydrology %>% 
+                st_transform(st_crs(des_grid_centroid))) %>%
+  as.data.frame() %>%
+  mutate(uniqueID = as.character(row_number())) %>%
+  gather(-uniqueID, key = "variable", value = "value") %>%
+  dplyr::select(-variable) %>%
+  group_by(uniqueID) %>%
+  summarize(water_dist = min(value) %>% as.numeric())
+
+des_grid_out <- left_join(des_grid_out, water_dist) %>% st_sf()
+
+
+
+```
+
+
+```{r des land use}
+
+des_zone_grid <- des_grid %>% st_centroid() %>% st_join(des_zoning, join=st_within) %>% 
+  st_drop_geometry() %>% 
+  full_join(., des_grid) %>% st_sf()
+
+des_grid_out <- left_join(des_grid_out, des_zone_grid %>% st_drop_geometry()) %>% st_sf()
+
+
+
+```
+
+```{r des lu map}
+
+p1<-des_zoning %>% ggplot()+
+  geom_sf(aes(fill = ZoningType), color = NA)+
+  geom_sf(data = des_grid_centroid, alpha = .5, size = .5)+
+  mapTheme()+
+  theme(legend.position = 'none')+
+  labs(subtitle = 'Des Moines Land Use into fishnet')
+
+p2<-des_grid_out %>% ggplot()+
+  geom_sf(aes(fill = ZoningType), color = NA)+
+  mapTheme()+
+  labs(subtitle = '')
+
+plot_grid(p1,p2, rel_widths = c(.7,1))
+
+```
+
+```{r 3 des moines graphs}
+
+
+p1<-ggplot(des_grid)+
+  geom_sf(color = NA, fill = 'lightblue')+
+  mapTheme()+
+  labs(title = 'Des Moines', subtitle = 'To predict: Innundation')
+
+
+p2<-ggplot(des_grid_out)+
+  geom_sf(aes(fill = slope), color = NA)+
+  mapTheme()+
+  labs(title = '', subtitle = 'Slope', fill = '')
+
+
+p3<-ggplot(des_grid_out)+
+  geom_sf(aes(fill = water_dist), color = NA)+
+  mapTheme()+
+  labs(title = '',subtitle = 'Distance to River', fill = 'meters')
+
+
+p4<- des_grid_out %>% ggplot()+
+  geom_sf(aes(fill = ZoningType), color = NA)+
+  mapTheme()+
+  labs(title = '',subtitle = 'Land Use', fill = '')
+
+plot_grid(p1,p2,p3,p4)
+```
+
+
+```{r files out}
+head(cal_grid_out)
+head(des_grid_out)
+
+# st_write(cal_grid_out, "cal_grid.geojson")
+# st_write(des_grid_out, "des_grid.geojson")
+
+```
+
+
+
 
